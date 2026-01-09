@@ -28,6 +28,7 @@
 │   └── nodes.dmp
 └── acc2taxid/
     └── nucl_gb.accession2taxid.gz
+```
 
 ## 🚀 実行手順 (Usage)
 
@@ -38,7 +39,9 @@
 （※概念的なコマンドです。実際には出力オプションが必須となるため、下の「実行例」を推奨します）
 ```bash
 python3 analyze_tm.py test_input.tsv --acc2taxid acc2taxid --taxdump taxdump
-
+```
+### 実行例
+```
 python3 analyze_tm.py /path/to/tm_result.tsv \
     --acc2taxid /path/to/acc2taxid \
     --taxdump /path/to/taxdump \
@@ -46,6 +49,7 @@ python3 analyze_tm.py /path/to/tm_result.tsv \
     --o /path/to/order_summary.csv \
     --f /path/to/family_summary.csv \
     --a /path/to/accession_taxonomy.csv
+```
 
 ### 📝 オプション詳細 (Options)
 
@@ -69,12 +73,15 @@ Step 1 で作成したCSV（例: class_summary.csv）を入力とし、系統樹
 （※概念的なコマンドです。実際には出力オプションが必須となるため、下の「実行例」を推奨します）
 ```bash
 python3 tree_map.py taxonomy_class_summary.csv output.png --taxdump taxdump
-
+```
+### 実行例
+```
 python3 tree_map.py /path/to/input.csv /path/to/output.pdf \
     --taxdump /path/to/taxdump \
     --a \
     --t Actinopteri \
     --d family
+```
 
 #### 2. tree_map.py のオプション
 
