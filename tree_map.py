@@ -169,13 +169,6 @@ def parse_args() -> argparse.Namespace:
         choices=["class", "order", "family"],
         help="どの分類階級まで描画するかを指定する",
     )
-    parser.add_argument(
-        "--accession2taxid",
-        "--acc2taxid",
-        dest="accession2taxid",
-        default="./accession2taxid/nucl_gb.accession2taxid",
-        help="アクセッション→taxid対応表またはディレクトリ（存在確認のみ）",
-    )
     return parser.parse_args()
 
 
@@ -1166,7 +1159,7 @@ def draw_tree(
                 zorder=30
             )
 
-    ax.set_xlim(root.x - 0.8, bar_start_x + max_bar_len + 1.0)
+    ax.set_xlim(root.x - 100.0, bar_start_x + max_bar_len + 300.0)
     ax.set_ylim(min_y - y_step, max_y + y_step)
     ax.axis("off")
     # ★修正2: tight_layout は巨大画像ではエラーの原因になるので削除する
@@ -1180,9 +1173,6 @@ def draw_tree(
 
 def main() -> None:
     args = parse_args()
-
-    if args.accession2taxid and not os.path.exists(args.accession2taxid):
-        print(f"[warn] accession2taxidファイルが見つかりません: {args.accession2taxid}")
 
     df = read_input(args.input_csv)
 
