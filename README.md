@@ -4,6 +4,8 @@
 さらに、作成されたcsvファイルから、プライマーの有効性を図示する系統樹を作成します。
 テストデータはreleaseで提供しています。
 https://github.com/Sacabambaeus/Tm_Align_analysis/releases/download/test_data/tm_result_mf-u_all_carangi.tsv
+Tm_Align用のミトコンドリアデータベースもreleaseで提供しています。
+https://github.com/Sacabambaeus/Tm_Align_analysis/releases/tag/database
 
 ## 📌 目的 (Purpose)
 1. **集計 (`analyze_tm.py`):** TmAlignのTSV出力を読み込み、NCBI Taxonomyデータベースを用いて生物種情報を付与・集計します。
@@ -130,6 +132,7 @@ python3 tree_map.py tm_mf-u_all_family.csv --a --t Carangiformes --d family cara
 ```
  * 赤色の図形がTm値、水色の図形がidentity(単純な塩基の一致率)、円がForwardプライマー、ひし形がReverseプライマー、右端の緑色の四角形と数字は、計算に使用したレコードの数。一つのTaxIDにつき、一つのレコードとして使用。
 <img width="1603" height="767" alt="carangiformes_tree_fam" src="https://github.com/user-attachments/assets/91dda607-ac04-424a-be38-2998a835a314" />
+
 
 
 
