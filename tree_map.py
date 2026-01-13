@@ -31,6 +31,11 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
+# --- 追加部分 ここから ---
+import matplotlib
+matplotlib.use('Agg')  # 画面表示せず、ファイル保存に特化させるおまじない
+# --- 追加部分 ここまで ---
+
 import matplotlib.pyplot as plt
 import pandas as pd
 
