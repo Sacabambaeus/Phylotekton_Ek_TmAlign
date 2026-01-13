@@ -101,7 +101,7 @@ python3 tree_map.py /path/to/input.csv /path/to/output.pdf \
 | 引数・オプション | 必須 | 説明 |
 | :--- | :--- | :--- |
 | `[入力CSV]` | **YES** | `analyze_tm.py` で出力された集計ファイル（例: `summary_class.csv`）。 |
-| `[出力画像]` | **YES** | 出力ファイル名。拡張子で `.png` または `.pdf` を指定します。<br>※巨大な系統樹になる場合は **.pdf** を推奨します。<br>※現在 `.png` では、系統樹が背景からはみ出してしまいます。系統樹のサイズにかかわらず、**pdf**を推奨します。 |
+| `[出力画像]` | **YES** | 出力ファイル名。拡張子で `.png` または `.pdf` を指定します。<br>※巨大な系統樹になる場合は **.pdf** を推奨します。<br>※現在 `.png` では、系統樹が背景からはみ出してしまいます。系統樹のサイズにかかわらず、**.pdf**を推奨します。 |
 | `--taxdump` | **YES** | `nodes.dmp` 等が入っているディレクトリを指定します。 |
 
 **フィルター設定（表示する生物種を絞り込む）**
@@ -128,6 +128,7 @@ python3 tree_map.py tm_mf-u_all_family.csv --a --t Carangiformes --d family cara
 ```
  * 赤色の図形がTm値、水色の図形がidentity(単純な塩基の一致率)、円がForwardプライマー、ひし形がReverseプライマー、右端の緑色の四角形と数字は、計算に使用したレコードの数。一つのTaxIDにつき、一つのレコードとして使用。
 <img width="1603" height="767" alt="carangiformes_tree_fam" src="https://github.com/user-attachments/assets/91dda607-ac04-424a-be38-2998a835a314" />
+
 
 
 
