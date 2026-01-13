@@ -10,6 +10,15 @@
 ## 📦 必要要件 (Requirements)
 
 * **Python 3.9+** (Python 3.9.18で開発)
+* **必須ライブラリ:**
+  * `pandas` (データ処理用)
+  * `matplotlib` (描画用)
+  * 以下のコマンドでインストール可能です:
+    ```bash
+    pip install pandas matplotlib
+    ```
+* **NCBI Taxonomy Data** ...
+* 
 * **NCBI Taxonomy Data**
   以下のFTPサイトから2つのファイルをダウンロードし、**指定のディレクトリ構成**で配置してください。
 
@@ -108,4 +117,9 @@ python3 tree_map.py /path/to/input.csv /path/to/output.pdf \
 | オプション | 説明 |
 | :--- | :--- |
 | `--t <名前>` | 系統樹の **根 (Root)** にする分類群を指定します。 |
+
 | `--d <階級>` | 描画する **末端 (Leaf)** の階級を指定します。<br>`class` (綱), `order` (目), `family` (科) から選択可能です。 |
+
+####出力される図(系統樹)
+###プライマーはMiFish-U
+
