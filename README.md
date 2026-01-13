@@ -1,6 +1,6 @@
 # TmAlign Taxonomy Analyzer & Tree Mapper
 
-**TmAlign — Local Duplex Stability Search** の解析結果を整理し、csv形式で出力するツールセットです。
+**TmAlign — Local Duplex Stability Search** (https://github.com/c2997108/TmAlign)の解析結果を整理し、csv形式で出力するツールセットです。
 さらに、作成されたcsvファイルから、プライマーの有効性を図示する系統樹を作成します。
 
 ## 📌 目的 (Purpose)
@@ -122,4 +122,5 @@ python3 tree_map.py /path/to/input.csv /path/to/output.pdf \
 
 ####出力される図(系統樹)
 ###プライマーはMiFish-U
+
 
