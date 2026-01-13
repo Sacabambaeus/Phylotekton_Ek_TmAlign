@@ -121,9 +121,10 @@ python3 tree_map.py /path/to/input.csv /path/to/output.pdf \
 | `--d <階級>` | 描画する **末端 (Leaf)** の階級を指定します。<br>`class` (綱), `order` (目), `family` (科) から選択可能です。 |
 
 **出力される図(系統樹)**
- * プライマーはMiFish-U、一部抜粋
- * 赤色の図形がTm値、水色の図形がidentity(単純な塩基の一致率)、円がForwardプライマー、ひし形がReverseプライマー、右端の緑色の四角形と数字は、計算に使用したTaxIDの数
+ * プライマーはMiFish-U、一部抜粋。
+ * 赤色の図形がTm値、水色の図形がidentity(単純な塩基の一致率)、円がForwardプライマー、ひし形がReverseプライマー、右端の緑色の四角形と数字は、計算に使用したレコードの数。一つのTaxIDにつき、一つのレコードとして使用。
 <img width="877" height="703" alt="スクリーンショット (55)" src="https://github.com/user-attachments/assets/c63320ee-66b7-4eaf-a2d7-8a77b95375cd" />
+
 
 
 
