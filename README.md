@@ -1,4 +1,4 @@
-# TmAlign Taxonomy Analyzer & Tree Mapper
+# Phylotekton Ek TmAlign
 
 **TmAlign — Local Duplex Stability Search** (https://github.com/c2997108/TmAlign) の解析結果を整理し、csv形式で出力するツールセットです。
 さらに、作成されたcsvファイルから、プライマーの有効性を図示する系統樹を作成します。
@@ -132,6 +132,7 @@ python3 tree_map.py /path/to/input.csv /path/to/output.pdf \
 ```
  * 赤色の図形がTm値、水色の図形がidentity(単純な塩基の一致率)、円がForwardプライマー、ひし形がReverseプライマー、右端の緑色の四角形と数字は、計算に使用したレコードの数。一つのTaxIDにつき、一つのレコードとして使用。
 <img width="1209" height="599" alt="carangiformes_family" src="https://github.com/user-attachments/assets/6088f0bf-efd0-49e3-934c-aab99e916174" />
+
 
 
 
