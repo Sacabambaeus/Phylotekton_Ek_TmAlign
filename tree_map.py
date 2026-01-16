@@ -331,6 +331,30 @@ def get_lineage_ranks(
     return lineage
 
 
+def is_row_lineage_consistent(
+    row: pd.Series,
+    taxid: int,
+    taxid_to_parent_rank: Dict[int, Tuple[int, str]],
+    taxid_to_name: Dict[int, str],
+) -> bool:
+    lineage = get_lineage_ranks(taxid, taxid_to_parent_rank, taxid_to_name)
+    for rank in RANK_ORDER:
+        if rank not in row:
+            continue
+        val = row.get(rank)
+        if pd.isna(val):
+            continue
+        name = str(val).strip()
+        if not name or name.lower() == "unknown":
+            continue
+        lineage_name = lineage.get(rank)
+        if not lineage_name:
+            return False
+        if lineage_name.lower() != name.lower():
+            return False
+    return True
+
+
 def get_lineage_path(
     taxid: Optional[int],
     taxid_to_parent_rank: Dict[int, Tuple[int, str]],
@@ -480,6 +504,7 @@ def filter_by_taxon_names(
     kept_rows = []
     skipped_unknown = 0
     skipped_mismatch = 0
+    skipped_inconsistent = 0
     
     # 高速化のためのメモ化 (TaxID -> Targetの子孫かどうか(bool))
     memo_verdict: Dict[int, bool] = {}
@@ -490,6 +515,9 @@ def filter_by_taxon_names(
         
         if tid is None:
             skipped_unknown += 1
+            continue
+        if not is_row_lineage_consistent(row, tid, taxid_to_parent_rank, taxid_to_name):
+            skipped_inconsistent += 1
             continue
 
         # 親を遡って target_taxids に含まれるかチェック
@@ -535,6 +563,8 @@ def filter_by_taxon_names(
 
     if skipped_unknown:
         print(f"[warn] 行のTaxIDを特定できず除外: {skipped_unknown} 件")
+    if skipped_inconsistent:
+        print(f"[warn] CSVの階級とTaxIDが矛盾するため除外: {skipped_inconsistent} 件")
     if skipped_mismatch:
         print(f"[info] フィルター条件外のため除外: {skipped_mismatch} 件")
 
@@ -584,28 +614,22 @@ def collect_leaves(node: TreeNode) -> List[TreeNode]:
 
 
 def row_has_zero(row: dict) -> bool:
-    zero_cols = [
-        "taxid_count",
-        "mean_accession_count",
-        "mean_q1_Tm",
-        "mean_q1_identity",
-        "mean_q2_Tm",
-        "mean_q2_identity",
-    ]
-    for col in zero_cols:
-        val = row.get(col)
-        try:
-            num = float(val)
-        except (TypeError, ValueError):
-            return True
-        if math.isnan(num) or math.isclose(num, 0.0):
-            return True
+    origin_val = row.get("origin_tax_count")
+    try:
+        origin_num = float(origin_val)
+    except (TypeError, ValueError):
+        return True
+    if math.isnan(origin_num) or math.isclose(origin_num, 0.0):
+        return True
     return False
 
 
 def mark_has_zero(node: TreeNode) -> bool:
     node.is_zero = node.data is None or (node.data is not None and row_has_zero(node.data))
-    child_zero = any(mark_has_zero(child) for child in node.children.values())
+    child_zero = False
+    for child in node.children.values():
+        if mark_has_zero(child):
+            child_zero = True
     node.has_zero_subtree = node.is_zero or child_zero
     return node.has_zero_subtree
 
@@ -999,7 +1023,8 @@ def draw_tree(
 
 #tax_count長方形の設定
             origin_val = parse_numeric(row.get("origin_tax_count"))
-            if origin_val is not None and origin_scale is not None:
+            origin_draw = origin_val is not None and not math.isclose(origin_val, 0.0)
+            if origin_draw and origin_scale is not None:
                 bar_len = calc_bar_len(origin_val, origin_scale)
                 bar_rect = plt.Rectangle(
                     (bar_start_x * 1.13, y - bar_height / 2),
@@ -1013,7 +1038,8 @@ def draw_tree(
                 ax.add_patch(bar_rect)
 
             tax_val = parse_numeric(row.get("taxid_count"))
-            if tax_val is not None and tax_scale is not None:
+            tax_draw = tax_val is not None and not math.isclose(tax_val, 0.0)
+            if tax_draw and tax_scale is not None:
                 bar_len = calc_bar_len(tax_val, tax_scale)
                 bar_rect = plt.Rectangle(
                     (bar_start_x * 1.13, y - bar_height / 2),
@@ -1025,9 +1051,17 @@ def draw_tree(
                     zorder=8,
                 )
                 ax.add_patch(bar_rect)
+
+            label_text = None
+            if tax_draw:
                 label_text = f"{tax_val:.0f}"
-                if origin_val is not None:
-                    label_text = f"{label_text} ({origin_val:.0f})"
+            if origin_draw:
+                origin_label = f"{origin_val:.0f}"
+                if label_text:
+                    label_text = f"{label_text} ({origin_label})"
+                else:
+                    label_text = f"({origin_label})"
+            if label_text:
                 ax.text(
                     bar_start_x * 1.12 - 4.0,
                     y,
