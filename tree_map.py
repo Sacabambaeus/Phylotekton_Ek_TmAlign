@@ -5,7 +5,7 @@
 例: python3 mapping_tree8.py --a taxonomy_class_summary3.csv out.png
 
 入力: phylum, class, order, family, genus, taxid_count, mean_accession_count,
-      mean_q1_Tm, mean_q1_identity, mean_q2_Tm, mean_q2_identity
+      mean_q1_Tm, mean_q1_identity, mean_q2_Tm, mean_q2_identity, origin_tax_count
 出力: 系統樹 + 円/ひし形/長方形をマッピングしたPNG
 
 フィルター:
@@ -245,10 +245,14 @@ def read_input(csv_path: str) -> pd.DataFrame:
         "mean_q1_identity",
         "mean_q2_Tm",
         "mean_q2_identity",
+        "origin_tax_count",
     ]
     missing = [c for c in numeric_cols if c not in df.columns]
     if missing:
-        raise ValueError(f"必要な列が不足しています: {', '.join(missing)}")
+        if missing == ["origin_tax_count"]:
+            df["origin_tax_count"] = pd.NA
+        else:
+            raise ValueError(f"必要な列が不足しています: {', '.join(missing)}")
     df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
     return df
 
@@ -633,47 +637,77 @@ def scale_value(value: float, lower: float, upper: float, size_min: float, size_
 
 
 def assign_coordinates(root: TreeNode, y_step: float) -> None:
-# 1. 【移動】先に leaves を定義する
+    # 1. leaves の定義
     leaves = collect_leaves(root)
     if not leaves:
         return
-    x_step = 16.0
-    base_x = 0.4 + 2.0
-    if len(leaves) < 100:
-        root_x = base_x - x_step * 0.05 * len(leaves)
-    else:
-        root_x = base_x - x_step
 
+    # --- ▼ 設定：ここで長さを調整します ▼ ---
+    leaf_step = 24.0          # 末端（葉）への枝の長さ
+    intermediate_step = 40.0  # 中間ノードへの枝の長さ（ここを大きくするとグイッと伸びます）
+    # ------------------------------------
+
+    base_x = 0.4 + 2.0
+    
+    # root_x の計算（初期位置）
+    # 元のコードのロジックを流用しますが、係数は leaf_step を基準にします
+    if len(leaves) < 100:
+        root_x = base_x - leaf_step * 0.05 * len(leaves)
+    else:
+        root_x = base_x - leaf_step
 
     phylum_children = sorted(root.children.values(), key=lambda c: c.name)
-    gap_mult = 12.0  # 主要な系統間の余白（縦方向広め）
+    gap_mult = 12.0
     total_gaps = max(0, len(phylum_children) - 1) * gap_mult
     total_rows = len(leaves) + total_gaps
     start_y = (total_rows - 1) * y_step
 
-    def _assign(node: TreeNode, y_cursor: float) -> float:
-        node.x = root_x if node.rank == "root" else base_x + (node.depth - 1) * x_step
+    # ▼ 変更点: current_x 引数を追加しました
+    def _assign(node: TreeNode, y_cursor: float, current_x: float) -> float:
+        # 親から受け取った座標を自分のX座標にする
+        node.x = current_x
+        
+        # 葉ノード（末端）の場合
         if not node.children:
             node.y = y_cursor
             return y_cursor - y_step
-        if node.rank == "root":
+        
+        # --- ループ処理の共通化関数 ---
+        def process_children(children_list, current_y):
             child_ys = []
-            for idx, child in enumerate(phylum_children):
-                y_cursor = _assign(child, y_cursor)
+            for idx, child in enumerate(children_list):
+                
+                # ★ここで分岐: 子がさらに子供を持っている(=中間)なら長く、そうでなければ短く
+                if child.children:
+                    step = intermediate_step
+                else:
+                    step = leaf_step
+                
+                # 再帰呼び出し: 「今のX + 決めたステップ」を渡す
+                current_y = _assign(child, current_y, current_x + step)
+                
                 child_ys.append(child.y)
-                if idx < len(phylum_children) - 1:
-                    y_cursor -= y_step * gap_mult
+                
+                # Root直下のPhylum間の隙間処理
+                if node.rank == "root" and idx < len(children_list) - 1:
+                    current_y -= y_step * gap_mult
+            return current_y, child_ys
+
+        # --- Root と それ以外で処理対象リストを変える ---
+        if node.rank == "root":
+            targets = phylum_children
+        else:
+            targets = sorted(node.children.values(), key=lambda c: c.name)
+            
+        y_cursor, child_ys = process_children(targets, y_cursor)
+        
+        if child_ys:
             node.y = sum(child_ys) / len(child_ys)
-            return y_cursor
-        child_ys = []
-        for child in sorted(node.children.values(), key=lambda c: c.name):
-            y_cursor = _assign(child, y_cursor)
-            child_ys.append(child.y)
-        node.y = sum(child_ys) / len(child_ys)
+            
         return y_cursor
 
-    _assign(root, start_y)
-
+    # 初回呼び出し: root_x を渡してスタート
+    _assign(root, start_y, root_x)
 
 def collect_phylum_ranges(root: TreeNode) -> List[Tuple[str, float, float]]:
     ranges: List[Tuple[str, float, float]] = []
@@ -713,6 +747,15 @@ def draw_tree(
     show_class_labels: bool = False,
     exclude_label_ranks: Optional[Iterable[str]] = None,
 ) -> None:
+    def parse_numeric(value: object) -> Optional[float]:
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return None
+        if math.isnan(num):
+            return None
+        return num
+
     leaves = collect_leaves(root)
     if not leaves:
         raise ValueError("葉ノードが存在しません。入力を確認してください。")
@@ -733,42 +776,59 @@ def draw_tree(
 
     size_max = min(y_step * 0.5, 12.0)
     size_min = max(size_max * 0.1, 2.0)
-    bar_height = clamp(y_step * 0.5, 10.0, 80.0)
+    bar_height = clamp(y_step * 0.4, 10.0, 80.0)
     branch_thick = clamp(y_step * 0.84, 6.0, 21.0)
-    shape_spacing = max(size_max * 0.7 + 1.0, 5.0) * 6
+    shape_spacing = max(size_max * 1.0 + 1.0, 5.0) * 6.7
 
     tm_range = (30.0, 65.0)
     id_range = (50.0, 100.0)
 
     tree_end_x = max((leaf.x for leaf in leaves), default=2.0)
-    red_cx = tree_end_x * 1.1
+    red_cx = tree_end_x * 1.2
     blue_cx = red_cx + shape_spacing
     red_dx = blue_cx + shape_spacing
     blue_dx = red_dx + shape_spacing
 
     label_anchor_x = blue_dx + shape_spacing + 1.5
     label_bar_gap = 2.0
-    max_bar_len = max(12.0, size_max * 2.0)
+    max_bar_len = max(120.0, size_max * 20.0)
     #tax_count barの位置
     bar_shift = 200.0
     bar_start_x = label_anchor_x + label_bar_gap + bar_shift
 
     taxid_counts: List[float] = []
+    origin_counts: List[float] = []
     for l in leaves:
         if not l.data:
             continue
-        val = l.data.get("taxid_count")
-        try:
-            num = float(val)
-        except (TypeError, ValueError):
-            continue
-        if math.isnan(num):
-            continue
-        taxid_counts.append(num)
+        tax_num = parse_numeric(l.data.get("taxid_count"))
+        if tax_num is not None:
+            taxid_counts.append(tax_num)
+        origin_num = parse_numeric(l.data.get("origin_tax_count"))
+        if origin_num is not None:
+            origin_counts.append(origin_num)
 
-    if not taxid_counts:
-        raise ValueError("taxid_countが数値として読み取れませんでした。")
-    tax_min, tax_max = min(taxid_counts), max(taxid_counts)
+    tax_scale = (min(taxid_counts), max(taxid_counts)) if taxid_counts else None
+    origin_scale = (min(origin_counts), max(origin_counts)) if origin_counts else None
+
+    # 【設定】 0.5 = 平方根(ルート)。 1.0 = そのまま(リニア)。
+    # 数値を大きくするほど(0.6, 0.7...)、差が強調されて棒の長さの差が激しくなります。
+    # 対数より差をつけたい場合は 0.5 前後がおすすめです。
+    power_factor = 0.7
+
+    def calc_bar_len(val_num: float, scale: Tuple[float, float]) -> float:
+        min_val, max_val = scale
+        val_calc = max(val_num, 0.0) ** power_factor
+        min_calc = max(min_val, 0.0) ** power_factor
+        max_calc = max(max_val, 0.0) ** power_factor
+
+        if math.isclose(max_calc, min_calc):
+            percent = 1.0
+        else:
+            percent = 0.01 + (val_calc - min_calc) / (max_calc - min_calc) * 0.99
+
+        percent = clamp(percent, 0.01, 1.0)
+        return max_bar_len * percent
 
     max_y = max(leaf.y for leaf in leaves)
     min_y = min(leaf.y for leaf in leaves)
@@ -777,7 +837,7 @@ def draw_tree(
     raw_height = (max_y - min_y + 2 * y_step) * 0.06
     height = max(raw_height, 80.0)
     
-    width = clamp(float(bar_start_x + max_bar_len + 4.0), 20.0, 160.0)
+    width = clamp(float(bar_start_x + max_bar_len + 4.0), 40.0, 160.0)
     # ---------------------------------------------------------
     # ピクセル数制限 (2^16 = 65536) を回避するためのDPI自動調整
     # ---------------------------------------------------------
@@ -832,119 +892,113 @@ def draw_tree(
         y = leaf.y
         text_color = "red" if (leaf.rank != "phylum" and leaf.is_zero) else "black"
         branch_end_x = label_anchor_x - 0.45
-        ax.plot([leaf.x, branch_end_x], [y, y], color="#696969", lw=branch_thick * 0.7, solid_capstyle="round")
+        ax.plot([leaf.x, branch_end_x], [y, y], color="#696969", lw=branch_thick, solid_capstyle="round")
 
         if leaf.data:
             row = leaf.data
-            red_diam = scale_value(float(row["mean_q1_Tm"]), tm_range[0], tm_range[1], size_min, size_max)
-            blue_diam = scale_value(float(row["mean_q1_identity"]), id_range[0], id_range[1], size_min, size_max)
-            red_diag = scale_value(float(row["mean_q2_Tm"]), tm_range[0], tm_range[1], size_min, size_max)
-            blue_diag = scale_value(float(row["mean_q2_identity"]), id_range[0], id_range[1], size_min, size_max)
-
             scatter_scale = 18.0
-            
-            # 円 (marker='o')
-            ax.scatter(
-                red_cx,
-                y,
-                s=(red_diam * scatter_scale) ** 2,
-                marker="o",
-                color="#e74c3c",
-                alpha=1.0,
-                edgecolors="#696969",
-                linewidths=0.8,
-                zorder=10,
-            )
 
-            ax.scatter(
-                blue_cx,
-                y,
-                s=(blue_diam * scatter_scale) ** 2,
-                marker="o",
-                color="cyan",
-                alpha=1.0,
-                edgecolors="#696969",
-                linewidths=0.8,
-                zorder=10,
-            )
+            val_q1_tm = parse_numeric(row.get("mean_q1_Tm"))
+            if val_q1_tm is not None:
+                red_diam = scale_value(val_q1_tm, tm_range[0], tm_range[1], size_min, size_max)
+                # 円 (marker='o')
+                ax.scatter(
+                    red_cx,
+                    y,
+                    s=(red_diam * scatter_scale) ** 2.1,
+                    marker="o",
+                    color="#e74c3c",
+                    alpha=1.0,
+                    edgecolors="#696969",
+                    linewidths=0.8,
+                    zorder=10,
+                )
 
-            # ひし形 (marker='D')
-            ax.scatter(
-                red_dx,
-                y,
-                s=(red_diag * scatter_scale) ** 2,
-                marker="D",
-                color="#e74c3c",
-                alpha=1.0,
-                edgecolors="#696969",
-                linewidths=0.8,
-                zorder=10,
-            )
+            val_q1_identity = parse_numeric(row.get("mean_q1_identity"))
+            if val_q1_identity is not None:
+                blue_diam = scale_value(val_q1_identity, id_range[0], id_range[1], size_min, size_max)
+                ax.scatter(
+                    blue_cx,
+                    y,
+                    s=(blue_diam * scatter_scale) ** 2.1,
+                    marker="o",
+                    color="cyan",
+                    alpha=1.0,
+                    edgecolors="#696969",
+                    linewidths=0.8,
+                    zorder=10,
+                )
 
-            ax.scatter(
-                blue_dx,
-                y,
-                s=(blue_diag * scatter_scale) ** 2,
-                marker="D",
-                color="cyan",
-                alpha=1.0,
-                edgecolors="#696969",
-                linewidths=0.8,
-                zorder=10,
-            )
+            val_q2_tm = parse_numeric(row.get("mean_q2_Tm"))
+            if val_q2_tm is not None:
+                red_diag = scale_value(val_q2_tm, tm_range[0], tm_range[1], size_min, size_max)
+                # ひし形 (marker='D')
+                ax.scatter(
+                    red_dx,
+                    y,
+                    s=(red_diag * scatter_scale) ** 2,
+                    marker="D",
+                    color="#e74c3c",
+                    alpha=1.0,
+                    edgecolors="#696969",
+                    linewidths=0.8,
+                    zorder=10,
+                )
+
+            val_q2_identity = parse_numeric(row.get("mean_q2_identity"))
+            if val_q2_identity is not None:
+                blue_diag = scale_value(val_q2_identity, id_range[0], id_range[1], size_min, size_max)
+                ax.scatter(
+                    blue_dx,
+                    y,
+                    s=(blue_diag * scatter_scale) ** 2,
+                    marker="D",
+                    color="cyan",
+                    alpha=1.0,
+                    edgecolors="#696969",
+                    linewidths=0.8,
+                    zorder=10,
+                )
 
             text_kwargs = dict(ha="center", va="center", fontsize=80, color="black", fontweight="bold", zorder=20)
             # ▼ 円・ひし形の数値：ずらしたい量をここで設定（数字を大きくするともっと下に行きます）
             
             if leaf_count <= 30:
-               text_offset_y = y_step * 0.4
+               text_offset_y = y_step * 0.36
             elif leaf_count <= 80:
-               text_offset_y = y_step * 0.5
+               text_offset_y = y_step * 0.45
             else:
-               text_offset_y = y_step * 0.6
+               text_offset_y = y_step * 0.54
 
-            ax.text(red_cx, y - text_offset_y, f"{float(row['mean_q1_Tm']):.2f}", **text_kwargs)
-            ax.text(blue_cx, y - text_offset_y, f"{float(row['mean_q1_identity']):.2f}", **text_kwargs)
-            ax.text(red_dx, y - text_offset_y, f"{float(row['mean_q2_Tm']):.2f}", **text_kwargs)
-            ax.text(blue_dx, y - text_offset_y, f"{float(row['mean_q2_identity']):.2f}", **text_kwargs)
+            if val_q1_tm is not None:
+                ax.text(red_cx, y - text_offset_y, f"{val_q1_tm:.2f}", **text_kwargs)
+            if val_q1_identity is not None:
+                ax.text(blue_cx, y - text_offset_y, f"{val_q1_identity:.2f}", **text_kwargs)
+            if val_q2_tm is not None:
+                ax.text(red_dx, y - text_offset_y, f"{val_q2_tm:.2f}", **text_kwargs)
+            if val_q2_identity is not None:
+                ax.text(blue_dx, y - text_offset_y, f"{val_q2_identity:.2f}", **text_kwargs)
 
-            val = row.get("taxid_count")
-            tax_available = False
-            try:
-                val_num = float(val)
-                if not math.isnan(val_num):
-                    tax_available = True
-            except (TypeError, ValueError):
-                tax_available = False
-
-            if tax_available:
-                # ▼▼▼ 修正箇所ここから ▼▼▼
-                
-                # 【設定】 0.5 = 平方根(ルート)。 1.0 = そのまま(リニア)。
-                # 数値を大きくするほど(0.6, 0.7...)、差が強調されて棒の長さの差が激しくなります。
-                # 対数より差をつけたい場合は 0.5 前後がおすすめです。
-                power_factor = 0.7 
-
-                # log10 ではなく べき乗(**) で計算する
-                # (max(..., 0.0) は負の数エラー回避用)
-                val_calc = max(val_num, 0.0) ** power_factor
-                min_calc = max(tax_min, 0.0) ** power_factor
-                max_calc = max(tax_max, 0.0) ** power_factor
-
-                if math.isclose(max_calc, min_calc):
-                    percent = 1.0
-                else:
-                    # 計算した値(val_calc)を使って割合を出す
-                    percent = 0.01 + (val_calc - min_calc) / (max_calc - min_calc) * 0.99
-                
-                # ▲▲▲ 修正箇所ここまで (この下の percent = clamp... はそのままでOK) ▲▲▲
-
-                percent = clamp(percent, 0.01, 1.0)
-                bar_len = max_bar_len * percent
-                
-                # ... (以下、bar_rect の描画などはそのまま)
+#tax_count長方形の設定
+            origin_val = parse_numeric(row.get("origin_tax_count"))
+            if origin_val is not None and origin_scale is not None:
+                bar_len = calc_bar_len(origin_val, origin_scale)
                 bar_rect = plt.Rectangle(
-                    (bar_start_x * 0.95, y - bar_height / 2),
+                    (bar_start_x * 1.13, y - bar_height / 2),
+                    bar_len,
+                    bar_height,
+                    facecolor="#b0b0b0",
+                    edgecolor="#696969",
+                    lw=0.8,
+                    zorder=7,
+                )
+                ax.add_patch(bar_rect)
+
+            tax_val = parse_numeric(row.get("taxid_count"))
+            if tax_val is not None and tax_scale is not None:
+                bar_len = calc_bar_len(tax_val, tax_scale)
+                bar_rect = plt.Rectangle(
+                    (bar_start_x * 1.13, y - bar_height / 2),
                     bar_len,
                     bar_height,
                     facecolor="#05a54b",
@@ -953,10 +1007,13 @@ def draw_tree(
                     zorder=8,
                 )
                 ax.add_patch(bar_rect)
+                label_text = f"{tax_val:.0f}"
+                if origin_val is not None:
+                    label_text = f"{label_text} ({origin_val:.0f})"
                 ax.text(
-                    bar_start_x * 0.95 - 4.0,
+                    bar_start_x * 1.12 - 4.0,
                     y,
-                    f"{val_num:.0f}",
+                    label_text,
                     ha="right",
                     va="center",
                     fontsize=80,
@@ -1007,7 +1064,7 @@ def draw_tree(
             [branch_end_x, label_anchor_x],
             [y, y],
             color="#696969",
-            lw=branch_thick * 0.5,
+            lw=branch_thick,
             solid_capstyle="round",
         )
 
