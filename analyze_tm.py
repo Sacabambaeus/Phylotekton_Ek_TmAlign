@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Organize tm_result_tm30.tsv offline using local accession2taxid and taxdump data.
+Organize tm_result_tm30.tsv offline using local accession2taxid and taxdump data,
+with origin TaxID counts derived from a GenBank FASTA.
 
 Outputs
 -------
@@ -12,6 +13,7 @@ import argparse
 import gzip
 import json
 import os
+import re
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -28,12 +30,14 @@ SUMMARY_METRIC_COLUMNS = [
     "mean_q2_Tm",
     "mean_q2_identity",
 ]
-SUMMARY_OUTPUT_COLUMNS = SUMMARY_TAXONOMY_COLUMNS + SUMMARY_METRIC_COLUMNS
+ORIGIN_COUNT_COLUMN = "origin_tax_count"
+SUMMARY_OUTPUT_COLUMNS = SUMMARY_TAXONOMY_COLUMNS + SUMMARY_METRIC_COLUMNS + [ORIGIN_COUNT_COLUMN]
 GROUP_MAP = {
     "class": ["phylum", "class"],
     "order": ["phylum", "class", "order"],
     "family": ["phylum", "class", "order", "family"],
 }
+FASTA_PREFIXES = {"gb", "emb", "dbj", "ref", "gi", "sp", "tr", "lcl"}
 
 
 def load_cache(path: Optional[str]) -> Dict[str, object]:
@@ -88,6 +92,42 @@ def write_csv(df: pd.DataFrame, path: str, label: str) -> None:
     ensure_parent_dir(path)
     df.to_csv(path, index=False)
     print(f"[info] Wrote {label} -> {path}")
+
+
+def open_text_maybe_gzip(path: str):
+    if path.endswith(".gz"):
+        return gzip.open(path, "rt", encoding="utf-8", errors="replace")
+    return open(path, "r", encoding="utf-8", errors="replace")
+
+
+def extract_accession_from_header(header: str) -> str:
+    tokens = re.split(r"[|\s]+", header.strip())
+    for token in tokens:
+        if not token:
+            continue
+        candidate = token.strip()
+        lowered = candidate.lower()
+        if lowered in FASTA_PREFIXES:
+            continue
+        if "=" in candidate:
+            continue
+        if not re.search(r"[A-Za-z]", candidate):
+            continue
+        if re.search(r"\d", candidate):
+            return candidate
+    return ""
+
+
+def read_fasta_accessions(path: str) -> List[str]:
+    accessions: List[str] = []
+    with open_text_maybe_gzip(path) as fh:
+        for line in fh:
+            if line.startswith(">"):
+                header = line[1:].strip()
+                acc = extract_accession_from_header(header)
+                if acc:
+                    accessions.append(acc)
+    return accessions
 
 
 def _map_accessions_to_taxids_local(
@@ -255,6 +295,67 @@ def lineage_from_taxdump(taxids: List[str], taxdump: Dict[str, Dict[str, str]]) 
         info["scientific_name"] = normalize_taxon(name.get(tid, ""))
         out[tid] = info
     return out
+
+
+def build_taxonomy_index(taxdump: Dict[str, Dict[str, str]], rank: str) -> pd.DataFrame:
+    if rank not in GROUP_MAP:
+        raise ValueError(f"Unsupported rank: {rank}")
+    taxids = [tid for tid, rnk in taxdump["rank"].items() if rnk == rank]
+    if not taxids:
+        return pd.DataFrame(columns=GROUP_MAP[rank])
+
+    lineage = lineage_from_taxdump(taxids, taxdump)
+    records: List[Dict[str, str]] = []
+    for tid in taxids:
+        info = lineage.get(tid, {})
+        record = {col: normalize_taxon(info.get(col, "")) for col in GROUP_MAP[rank]}
+        records.append(record)
+
+    df = pd.DataFrame(records, columns=GROUP_MAP[rank])
+    df = normalize_taxonomy_frame(df, GROUP_MAP[rank])
+    df.drop_duplicates(inplace=True)
+    df.sort_values(GROUP_MAP[rank], inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    return df
+
+
+def compute_origin_tax_counts(
+    taxids: List[str],
+    lineage: Dict[str, Dict[str, str]],
+) -> Dict[str, pd.DataFrame]:
+    base_cols = ["phylum", "class", "order", "family"]
+    if not taxids:
+        return {
+            rank: pd.DataFrame(columns=GROUP_MAP[rank] + [ORIGIN_COUNT_COLUMN])
+            for rank in ("class", "order", "family")
+        }
+
+    unique_taxids = [tid for tid in dict.fromkeys(taxids) if tid]
+    records: List[Dict[str, str]] = []
+    for tid in unique_taxids:
+        info = lineage.get(tid, {})
+        record: Dict[str, str] = {"TaxID": tid}
+        for col in base_cols:
+            record[col] = normalize_taxon(info.get(col, ""))
+        records.append(record)
+
+    df = pd.DataFrame(records)
+    df = normalize_taxonomy_frame(df, base_cols)
+
+    counts: Dict[str, pd.DataFrame] = {}
+    for rank in ("class", "order", "family"):
+        group_cols = GROUP_MAP[rank]
+        if df.empty:
+            counts[rank] = pd.DataFrame(columns=group_cols + [ORIGIN_COUNT_COLUMN])
+        else:
+            cnt = (
+                df.groupby(group_cols, dropna=False)["TaxID"]
+                .nunique()
+                .reset_index()
+                .rename(columns={"TaxID": ORIGIN_COUNT_COLUMN})
+            )
+            counts[rank] = cnt
+    return counts
 
 
 def read_tm_results(path: str) -> pd.DataFrame:
@@ -428,10 +529,10 @@ def compute_taxid_summary(acc_df: pd.DataFrame, lineage: Dict[str, Dict[str, str
 def summarize_for_tree_map(df: pd.DataFrame, rank: str) -> pd.DataFrame:
     if rank not in GROUP_MAP:
         raise ValueError(f"Unsupported rank: {rank}")
-    if df.empty:
-        return pd.DataFrame(columns=SUMMARY_OUTPUT_COLUMNS)
-
     group_cols = GROUP_MAP[rank]
+    if df.empty:
+        return pd.DataFrame(columns=group_cols + SUMMARY_METRIC_COLUMNS)
+
     grouped = df.groupby(group_cols, dropna=False)
     summary = (
         grouped.agg(
@@ -444,15 +545,50 @@ def summarize_for_tree_map(df: pd.DataFrame, rank: str) -> pd.DataFrame:
         )
         .reset_index()
     )
+    return summary
+
+
+def build_rank_summary(
+    taxdump: Dict[str, Dict[str, str]],
+    rank: str,
+    metrics: pd.DataFrame,
+    origin_counts: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    if rank not in GROUP_MAP:
+        raise ValueError(f"Unsupported rank: {rank}")
+    group_cols = GROUP_MAP[rank]
+
+    base = build_taxonomy_index(taxdump, rank)
+    extra_groups: List[pd.DataFrame] = []
+    if not metrics.empty:
+        extra_groups.append(metrics[group_cols])
+    if origin_counts is not None and not origin_counts.empty:
+        extra_groups.append(origin_counts[group_cols])
+    if extra_groups:
+        extra = pd.concat(extra_groups, ignore_index=True).drop_duplicates()
+        base = pd.concat([base, extra], ignore_index=True).drop_duplicates()
+
+    merged = base.merge(metrics, on=group_cols, how="left")
+    if origin_counts is not None and not origin_counts.empty:
+        merged = merged.merge(origin_counts, on=group_cols, how="left")
+    else:
+        merged[ORIGIN_COUNT_COLUMN] = pd.NA
 
     for col in SUMMARY_TAXONOMY_COLUMNS:
-        if col not in summary.columns:
-            summary[col] = ""
+        if col not in merged.columns:
+            merged[col] = ""
+        else:
+            merged[col] = merged[col].fillna("")
+    for col in SUMMARY_METRIC_COLUMNS:
+        if col not in merged.columns:
+            merged[col] = pd.NA
+    if ORIGIN_COUNT_COLUMN not in merged.columns:
+        merged[ORIGIN_COUNT_COLUMN] = pd.NA
 
-    summary = summary[SUMMARY_OUTPUT_COLUMNS]
-    summary.sort_values(group_cols, inplace=True)
-    summary.reset_index(drop=True, inplace=True)
-    return summary
+    merged = merged[SUMMARY_OUTPUT_COLUMNS]
+    merged.sort_values(group_cols, inplace=True)
+    merged.reset_index(drop=True, inplace=True)
+    return merged
 
 
 def main() -> None:
@@ -460,6 +596,7 @@ def main() -> None:
         description="Generate class/order/family summaries compatible with tree_map1.15.py",
     )
     parser.add_argument("input", help="Input TSV from TmBLAST")
+    parser.add_argument("--fasta", required=True, help="Input GenBank FASTA for origin taxon counts")
 
     default_a2t = os.environ.get("ACC2TAXID_DIR", "accession2taxid")
     default_taxdump = os.environ.get("TAXDUMP_DIR", "taxdump")
@@ -505,28 +642,46 @@ def main() -> None:
     df_best = filter_best_hits(df_raw)
     print(f"[info] Best hits retained: {len(df_best):,} rows (unique per query/accession)")
 
-    accessions = df_best["contig"].dropna().astype(str).tolist()
-    print(f"[info] Resolving {len(set(accessions)):,} unique accessions to TaxIDs...")
-    acc2tax = map_accessions_to_taxids(accessions, cache_path=args.acc_cache, a2t_dir=args.acc2taxid)
-    resolved = sum(1 for v in acc2tax.values() if v)
-    unresolved = len(acc2tax) - resolved
-    print(f"[info] Accession->TaxID resolved: {resolved:,} ok, {unresolved:,} unresolved")
+    fasta_accessions = read_fasta_accessions(args.fasta)
+    print(f"[info] Loaded {len(fasta_accessions):,} FASTA headers from {args.fasta}")
+
+    accessions_tsv = df_best["contig"].dropna().astype(str).tolist()
+    unique_tsv = list(dict.fromkeys(accessions_tsv))
+    unique_fasta = list(dict.fromkeys(fasta_accessions))
+    all_accessions = list(dict.fromkeys(unique_tsv + unique_fasta))
+    print(
+        "[info] Resolving "
+        f"{len(all_accessions):,} unique accessions (TSV {len(unique_tsv):,} + FASTA {len(unique_fasta):,}) "
+        "to TaxIDs..."
+    )
+    acc2tax = map_accessions_to_taxids(all_accessions, cache_path=args.acc_cache, a2t_dir=args.acc2taxid)
+    resolved_all = sum(1 for acc in all_accessions if acc2tax.get(acc))
+    unresolved_all = len(all_accessions) - resolved_all
+    print(f"[info] Accession->TaxID resolved: {resolved_all:,} ok, {unresolved_all:,} unresolved")
+
+    resolved_fasta = sum(1 for acc in unique_fasta if acc2tax.get(acc))
+    unresolved_fasta = len(unique_fasta) - resolved_fasta
+    print(f"[info] FASTA accessions resolved: {resolved_fasta:,} ok, {unresolved_fasta:,} unresolved")
 
     df_best = df_best.copy()
     df_best["TaxID"] = df_best["contig"].map(lambda acc: acc2tax.get(acc))
 
+    fasta_taxids = [str(acc2tax[acc]) for acc in unique_fasta if acc2tax.get(acc)]
     taxids = [str(t) for t in df_best["TaxID"].dropna().unique()]
-    print(f"[info] Loading taxonomy for {len(taxids):,} TaxIDs from {args.taxdump}...")
+    taxids_all = sorted(set(taxids) | set(fasta_taxids))
+    print(f"[info] Loading taxonomy for {len(taxids_all):,} TaxIDs from {args.taxdump}...")
     taxdump = load_taxdump(args.taxdump)
 
     tax_cache_raw = load_cache(args.tax_cache)
     tax_cache = {str(k): v for k, v in tax_cache_raw.items() if isinstance(v, dict)}
-    lineage_missing = [tid for tid in taxids if tid not in tax_cache]
+    lineage_missing = [tid for tid in taxids_all if tid not in tax_cache]
     if lineage_missing:
         lineage_new = lineage_from_taxdump(lineage_missing, taxdump)
         tax_cache.update(lineage_new)
         save_cache(args.tax_cache, tax_cache)
-    lineage = {tid: tax_cache.get(tid, {}) for tid in taxids}
+    lineage = {tid: tax_cache.get(tid, {}) for tid in taxids_all}
+
+    origin_counts = compute_origin_tax_counts(fasta_taxids, lineage)
 
     accession_metrics = compute_accession_metrics(df_best)
     if args.accession_out:
@@ -541,13 +696,16 @@ def main() -> None:
 
     taxid_summary = compute_taxid_summary(accession_metrics, lineage)
 
-    class_summary = summarize_for_tree_map(taxid_summary, "class")
+    class_metrics = summarize_for_tree_map(taxid_summary, "class")
+    class_summary = build_rank_summary(taxdump, "class", class_metrics, origin_counts.get("class"))
     write_csv(class_summary, args.class_out, "class summary")
 
-    order_summary = summarize_for_tree_map(taxid_summary, "order")
+    order_metrics = summarize_for_tree_map(taxid_summary, "order")
+    order_summary = build_rank_summary(taxdump, "order", order_metrics, origin_counts.get("order"))
     write_csv(order_summary, args.order_out, "order summary")
 
-    family_summary = summarize_for_tree_map(taxid_summary, "family")
+    family_metrics = summarize_for_tree_map(taxid_summary, "family")
+    family_summary = build_rank_summary(taxdump, "family", family_metrics, origin_counts.get("family"))
     write_csv(family_summary, args.family_out, "family summary")
 
 
