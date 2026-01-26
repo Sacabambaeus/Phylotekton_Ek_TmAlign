@@ -108,6 +108,18 @@ KINGDOM_KEYWORDS = {
     "m": {"monera", "bacteria", "eubacteria", "archaea"},
 }
 
+DEPTH_CHOICES = ["class", "order", "family", "genus"]
+BASE_RANKS = ["phylum", "class", "order", "family", "genus"]
+METRIC_COLUMNS = [
+    "taxid_count",
+    "mean_accession_count",
+    "mean_q1_Tm",
+    "mean_q1_identity",
+    "mean_q2_Tm",
+    "mean_q2_identity",
+    "origin_tax_count",
+]
+
 
 @dataclass
 class TreeNode:
@@ -164,10 +176,17 @@ def parse_args() -> argparse.Namespace:
         help="特定の分類群名(phylum/class/order)のみを対象にする（複数指定可、カンマ/空白区切り可）",
     )
     parser.add_argument(
+        "--td",
+        dest="taxon_depths",
+        action="append",
+        nargs="+",
+        help="分類群ごとの深さ指定 (例: Chordata/order). 複数指定可、空白/カンマ区切り可",
+    )
+    parser.add_argument(
         "--depth",
         "--d",
         dest="depth",
-        choices=["class", "order", "family"],
+        choices=DEPTH_CHOICES,
         help="どの分類階級まで描画するかを指定する",
     )
     return parser.parse_args()
@@ -435,6 +454,187 @@ def normalize_taxon_filters(raw_list: Optional[List[object]]) -> List[str]:
                 if name:
                     normalized.append(name.lower())
     return normalized
+
+
+def normalize_taxon_depths(raw_list: Optional[List[object]]) -> List[Tuple[str, str]]:
+    if not raw_list:
+        return []
+    specs: List[Tuple[str, str]] = []
+    for raw in raw_list:
+        if isinstance(raw, (list, tuple)):
+            items = raw
+        else:
+            items = [raw]
+        for item in items:
+            text = str(item).strip()
+            if not text:
+                continue
+            text = text.replace(",", " ")
+            if text.count("/") > 1:
+                parts = [p for p in text.split() if p]
+            else:
+                parts = [text]
+            for part in parts:
+                entry = part.strip()
+                if not entry:
+                    continue
+                if "/" not in entry:
+                    raise ValueError(f"--td expects 'taxon/depth' format, got: {entry}")
+                taxon, depth = entry.split("/", 1)
+                taxon = taxon.strip()
+                depth = depth.strip().lower()
+                if not taxon:
+                    raise ValueError(f"--td missing taxon name in: {entry}")
+                if depth not in DEPTH_CHOICES:
+                    raise ValueError(f"--td depth must be one of {', '.join(DEPTH_CHOICES)}: {entry}")
+                specs.append((taxon, depth))
+    return specs
+
+
+def aggregate_to_depth(df: pd.DataFrame, depth: str) -> pd.DataFrame:
+    if depth not in BASE_RANKS:
+        return df
+    group_cols = BASE_RANKS[: BASE_RANKS.index(depth) + 1]
+
+    work = df.copy()
+    for col in BASE_RANKS:
+        if col not in work.columns:
+            work[col] = pd.NA
+    for col in METRIC_COLUMNS:
+        if col not in work.columns:
+            work[col] = pd.NA
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+
+    def sum_series(series: pd.Series) -> float:
+        return series.sum(min_count=1)
+
+    def weighted_mean(values: pd.Series, weights: pd.Series) -> float:
+        mask = values.notna() & weights.notna()
+        if not mask.any():
+            return pd.NA
+        w = weights[mask]
+        total = w.sum()
+        if total == 0 or pd.isna(total):
+            return pd.NA
+        return (values[mask] * w).sum() / total
+
+    def agg_group(group: pd.DataFrame) -> pd.Series:
+        weights = group["taxid_count"]
+        return pd.Series(
+            {
+                "taxid_count": sum_series(group["taxid_count"]),
+                "origin_tax_count": sum_series(group["origin_tax_count"]),
+                "mean_accession_count": weighted_mean(group["mean_accession_count"], weights),
+                "mean_q1_Tm": weighted_mean(group["mean_q1_Tm"], weights),
+                "mean_q1_identity": weighted_mean(group["mean_q1_identity"], weights),
+                "mean_q2_Tm": weighted_mean(group["mean_q2_Tm"], weights),
+                "mean_q2_identity": weighted_mean(group["mean_q2_identity"], weights),
+            }
+        )
+
+    grouped = work.groupby(group_cols, dropna=False)
+    summary = grouped.apply(agg_group).reset_index()
+
+    for col in BASE_RANKS:
+        if col not in summary.columns:
+            summary[col] = pd.NA
+    for col in BASE_RANKS[len(group_cols) :]:
+        summary[col] = pd.NA
+
+    summary = summary[BASE_RANKS + METRIC_COLUMNS]
+    summary.sort_values(group_cols, inplace=True)
+    summary.reset_index(drop=True, inplace=True)
+    return summary
+
+
+def aggregate_by_depth_assignments(df: pd.DataFrame, depth_series: pd.Series) -> pd.DataFrame:
+    if depth_series is None or depth_series.empty:
+        return df
+    frames: List[pd.DataFrame] = []
+    for depth in DEPTH_CHOICES:
+        mask = depth_series == depth
+        if not mask.any():
+            continue
+        frames.append(aggregate_to_depth(df.loc[mask], depth))
+    if not frames:
+        return df
+    merged = pd.concat(frames, ignore_index=True)
+    return merged
+
+
+def apply_taxon_depths(
+    df: pd.DataFrame,
+    specs: List[Tuple[str, str]],
+    name_to_taxids: Dict[str, List[int]],
+    taxid_to_parent_rank: Dict[int, Tuple[int, str]],
+    taxid_to_name: Dict[int, str],
+) -> Tuple[pd.DataFrame, Optional[pd.Series]]:
+    if not specs:
+        return df, None
+
+    targets: List[Tuple[set[int], int, str]] = []
+    for taxon, depth in specs:
+        taxids = name_to_taxids.get(taxon.lower(), [])
+        if not taxids:
+            print(f"[warn] --td taxon '{taxon}' not found in names.dmp; skipping")
+            continue
+        depth_idx = RANK_ORDER.index(depth)
+        targets.append((set(taxids), depth_idx, taxon))
+
+    if not targets:
+        return df, pd.Series(False, index=df.index)
+
+    lineage_cache: Dict[int, set[int]] = {}
+
+    def lineage_taxids(tid: int) -> set[int]:
+        if tid in lineage_cache:
+            return lineage_cache[tid]
+        lineage: set[int] = set()
+        current = tid
+        visited = set()
+        while current in taxid_to_parent_rank and current not in visited:
+            visited.add(current)
+            lineage.add(current)
+            parent, _ = taxid_to_parent_rank[current]
+            if parent == current:
+                break
+            current = parent
+        lineage_cache[tid] = lineage
+        return lineage
+
+    depth_limited = df.copy()
+    matched_mask = pd.Series(False, index=df.index)
+    depth_series = pd.Series(pd.NA, index=df.index, dtype=object)
+
+    for idx, row in depth_limited.iterrows():
+        tid = determine_row_taxid(row, RANK_ORDER, name_to_taxids, taxid_to_parent_rank)
+        if tid is None:
+            continue
+        if not is_row_lineage_consistent(row, tid, taxid_to_parent_rank, taxid_to_name):
+            continue
+        lineage = lineage_taxids(tid)
+
+        matched_depths: List[int] = []
+        for target_taxids, depth_idx, _ in targets:
+            if lineage.intersection(target_taxids):
+                matched_depths.append(depth_idx)
+
+        if not matched_depths:
+            continue
+
+        matched_mask.at[idx] = True
+        depth_idx = max(matched_depths)
+        depth_series.at[idx] = RANK_ORDER[depth_idx]
+        for rank in RANK_ORDER[depth_idx + 1 :]:
+            if rank in depth_limited.columns:
+                depth_limited.at[idx, rank] = pd.NA
+
+    if not matched_mask.any():
+        raise ValueError("指定された--tdに合致する行がCSVにありませんでした。")
+
+    depth_limited = depth_limited.loc[matched_mask].copy()
+    depth_series = depth_series.loc[matched_mask]
+    return depth_limited, depth_series
 
 
 def filter_by_flags(
@@ -1319,16 +1519,25 @@ def main() -> None:
         taxid_to_name,
     )
 
-    depth_limited_df = df_filtered
-    if args.depth:
-        depth_idx = RANK_ORDER.index(args.depth)
-        deeper_ranks = RANK_ORDER[depth_idx + 1 :]
-        if deeper_ranks:
-            depth_limited_df = df_filtered.copy()
-            for r in deeper_ranks:
-                depth_limited_df[r] = pd.NA
+    taxon_depth_specs = normalize_taxon_depths(args.taxon_depths)
+    depth_limited_df, depth_series = apply_taxon_depths(
+        df_filtered,
+        taxon_depth_specs,
+        name_to_taxids,
+        taxid_to_parent_rank,
+        taxid_to_name,
+    )
 
-    ranks_in_use = [rank for rank in RANK_ORDER if not depth_limited_df[rank].isna().all()]
+    if depth_series is not None:
+        depth_limited_df = aggregate_by_depth_assignments(depth_limited_df, depth_series)
+    elif args.depth:
+        depth_limited_df = aggregate_to_depth(depth_limited_df, args.depth)
+
+    ranks_in_use = [
+        rank
+        for rank in RANK_ORDER
+        if rank in depth_limited_df.columns and not depth_limited_df[rank].isna().all()
+    ]
     if args.depth:
         allowed: List[str] = []
         for r in RANK_ORDER:

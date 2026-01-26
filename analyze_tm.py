@@ -14,6 +14,7 @@ import gzip
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -36,6 +37,7 @@ GROUP_MAP = {
     "class": ["phylum", "class"],
     "order": ["phylum", "class", "order"],
     "family": ["phylum", "class", "order", "family"],
+    "genus": ["phylum", "class", "order", "family", "genus"],
 }
 FASTA_PREFIXES = {"gb", "emb", "dbj", "ref", "gi", "sp", "tr", "lcl"}
 
@@ -130,49 +132,89 @@ def read_fasta_accessions(path: str) -> List[str]:
     return accessions
 
 
+def _scan_accession2taxid_file(
+    path: str,
+    pending: set,
+    base_to_accs: Dict[str, List[str]],
+) -> Dict[str, str]:
+    found: Dict[str, str] = {}
+    try:
+        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+            _ = fh.readline()  # skip header
+            for line in fh:
+                parts = line.rstrip("\n").split("\t", 3)
+                if len(parts) < 3:
+                    continue
+                base_acc, acc_ver, taxid = parts[0], parts[1], parts[2]
+                if acc_ver in pending:
+                    found[acc_ver] = taxid
+                if base_acc in base_to_accs:
+                    for acc in base_to_accs[base_acc]:
+                        if acc in pending:
+                            found[acc] = taxid
+    except FileNotFoundError:
+        print(f"[warn] accession2taxid not found: {path}")
+    except Exception as exc:
+        print(f"[warn] failed reading {path}: {exc}")
+    return found
+
+
 def _map_accessions_to_taxids_local(
     accessions: List[str],
     a2t_files: List[str],
+    workers: int = 1,
 ) -> Dict[str, Optional[str]]:
     """Resolve accession -> TaxID using local accession2taxid .gz files.
 
     Matches accession.version first; falls back to accession without version.
     """
-    need_ver = set()
-    need_base = set()
-    for acc in accessions:
-        if not acc:
-            continue
-        need_ver.add(acc)
+    pending = {acc for acc in accessions if acc}
+    base_to_accs: Dict[str, List[str]] = {}
+    for acc in pending:
         base = acc.split(".", 1)[0]
-        need_base.add(base)
+        base_to_accs.setdefault(base, []).append(acc)
 
     found: Dict[str, str] = {}
-    for path in a2t_files:
-        try:
-            with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
-                _ = fh.readline()  # skip header
-                for line in fh:
-                    parts = line.rstrip("\n").split("\t")
-                    if len(parts) < 3:
-                        continue
-                    base_acc, acc_ver, taxid = parts[0], parts[1], parts[2]
-                    if acc_ver in need_ver and acc_ver not in found:
-                        found[acc_ver] = taxid
-                    if base_acc in need_base and base_acc not in found:
-                        found[base_acc] = taxid
-        except FileNotFoundError:
-            print(f"[warn] accession2taxid not found: {path}")
-        except Exception as exc:
-            print(f"[warn] failed reading {path}: {exc}")
+    if workers > 1 and len(a2t_files) > 1 and pending:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [
+                executor.submit(_scan_accession2taxid_file, path, pending, base_to_accs)
+                for path in a2t_files
+            ]
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    found.update(result)
+    else:
+        for path in a2t_files:
+            if not pending:
+                break
+            try:
+                with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+                    _ = fh.readline()  # skip header
+                    for line in fh:
+                        if not pending:
+                            break
+                        parts = line.rstrip("\n").split("\t", 3)
+                        if len(parts) < 3:
+                            continue
+                        base_acc, acc_ver, taxid = parts[0], parts[1], parts[2]
+                        if acc_ver in pending:
+                            found[acc_ver] = taxid
+                            pending.discard(acc_ver)
+                        if base_acc in base_to_accs:
+                            for acc in base_to_accs[base_acc]:
+                                if acc in pending:
+                                    found[acc] = taxid
+                                    pending.discard(acc)
+            except FileNotFoundError:
+                print(f"[warn] accession2taxid not found: {path}")
+            except Exception as exc:
+                print(f"[warn] failed reading {path}: {exc}")
 
     out: Dict[str, Optional[str]] = {}
     for acc in accessions:
-        if acc in found:
-            out[acc] = found[acc]
-        else:
-            base = acc.split(".", 1)[0]
-            out[acc] = found.get(base)
+        out[acc] = found.get(acc)
     return out
 
 
@@ -206,6 +248,7 @@ def map_accessions_to_taxids(
     accessions: List[str],
     cache_path: Optional[str],
     a2t_dir: Optional[str],
+    acc_workers: int = 1,
 ) -> Dict[str, Optional[str]]:
     pending = list(dict.fromkeys(acc for acc in accessions if acc))
 
@@ -221,7 +264,7 @@ def map_accessions_to_taxids(
         a2t_files = _find_a2t_files(a2t_dir)
         if a2t_files:
             print(f"[info] Using local accession2taxid files: {len(a2t_files)} found")
-            local_map = _map_accessions_to_taxids_local(pending, a2t_files)
+            local_map = _map_accessions_to_taxids_local(pending, a2t_files, workers=acc_workers)
             resolved.update({k: v for k, v in local_map.items() if v})
             pending = [acc for acc in pending if acc not in resolved]
 
@@ -323,11 +366,11 @@ def compute_origin_tax_counts(
     taxids: List[str],
     lineage: Dict[str, Dict[str, str]],
 ) -> Dict[str, pd.DataFrame]:
-    base_cols = ["phylum", "class", "order", "family"]
+    base_cols = ["phylum", "class", "order", "family", "genus"]
     if not taxids:
         return {
             rank: pd.DataFrame(columns=GROUP_MAP[rank] + [ORIGIN_COUNT_COLUMN])
-            for rank in ("class", "order", "family")
+            for rank in ("class", "order", "family", "genus")
         }
 
     unique_taxids = [tid for tid in dict.fromkeys(taxids) if tid]
@@ -343,7 +386,7 @@ def compute_origin_tax_counts(
     df = normalize_taxonomy_frame(df, base_cols)
 
     counts: Dict[str, pd.DataFrame] = {}
-    for rank in ("class", "order", "family"):
+    for rank in ("class", "order", "family", "genus"):
         group_cols = GROUP_MAP[rank]
         if df.empty:
             counts[rank] = pd.DataFrame(columns=group_cols + [ORIGIN_COUNT_COLUMN])
@@ -429,42 +472,55 @@ def compute_accession_metrics(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=columns)
 
-    records: List[Dict[str, Optional[str]]] = []
-    for (taxid, contig), group in df.groupby(["TaxID", "contig"], dropna=False):
-        rec: Dict[str, Optional[str]] = {
-            "TaxID": taxid if taxid else None,
-            "AccessionID": contig,
-            "span_bp": None,
-            "q1_start": None,
-            "q1_end": None,
-            "q1_Tm": None,
-            "q1_identity": None,
-            "q2_start": None,
-            "q2_end": None,
-            "q2_Tm": None,
-            "q2_identity": None,
-        }
-        for _, row in group.iterrows():
-            query = row["query_id"]
-            if query not in ("q1", "q2"):
-                continue
-            start = int(row["start"])
-            end = int(row["end"])
-            rec[f"{query}_start"] = start
-            rec[f"{query}_end"] = end
-            rec[f"{query}_Tm"] = float(row["Tm"])
-            rec[f"{query}_identity"] = float(row["identity"])
+    df_work = df[df["query_id"].isin(["q1", "q2"])].copy()
+    if df_work.empty:
+        return pd.DataFrame(columns=columns)
 
-        span_bp = compute_span_bp(rec)
-        if span_bp is not None:
-            rec["span_bp"] = span_bp
+    df_work = df_work[["TaxID", "contig", "query_id", "start", "end", "Tm", "identity"]]
+    pivot = df_work.pivot_table(
+        index=["TaxID", "contig"],
+        columns="query_id",
+        values=["start", "end", "Tm", "identity"],
+        aggfunc="first",
+    )
+    pivot.columns = [f"{query}_{metric}" for metric, query in pivot.columns]
+    acc_df = pivot.reset_index().rename(columns={"contig": "AccessionID"})
 
-        records.append(rec)
+    for col in (
+        "q1_start",
+        "q1_end",
+        "q1_Tm",
+        "q1_identity",
+        "q2_start",
+        "q2_end",
+        "q2_Tm",
+        "q2_identity",
+    ):
+        if col not in acc_df.columns:
+            acc_df[col] = pd.NA
 
-    acc_df = pd.DataFrame(records, columns=columns)
+    pos_cols = ["q1_start", "q1_end", "q2_start", "q2_end"]
+    pos = acc_df[pos_cols].apply(pd.to_numeric, errors="coerce")
+    acc_df["span_bp"] = pos.max(axis=1, skipna=False) - pos.min(axis=1, skipna=False)
+
+    acc_df = acc_df[
+        [
+            "TaxID",
+            "AccessionID",
+            "span_bp",
+            "q1_start",
+            "q1_end",
+            "q1_Tm",
+            "q1_identity",
+            "q2_start",
+            "q2_end",
+            "q2_Tm",
+            "q2_identity",
+        ]
+    ]
+
     for col in ("span_bp", "q1_start", "q1_end", "q2_start", "q2_end"):
-        if col in acc_df.columns:
-            acc_df[col] = pd.to_numeric(acc_df[col], errors="coerce").astype("Int64")
+        acc_df[col] = pd.to_numeric(acc_df[col], errors="coerce").astype("Int64")
     acc_df["TaxID"] = acc_df["TaxID"].astype("string")
     acc_df.loc[acc_df["TaxID"].isin(["None", "nan", "<NA>"]), "TaxID"] = pd.NA
     acc_df = acc_df.dropna(subset=["TaxID"]).copy()
@@ -614,9 +670,10 @@ def main() -> None:
         default=default_taxdump,
         help="Directory containing taxdump files nodes.dmp/names.dmp",
     )
-    parser.add_argument("--c", dest="class_out", required=True, help="Class summary output CSV path")
-    parser.add_argument("--o", dest="order_out", required=True, help="Order summary output CSV path")
-    parser.add_argument("--f", dest="family_out", required=True, help="Family summary output CSV path")
+    parser.add_argument("--c", dest="class_out", help="Class summary output CSV path")
+    parser.add_argument("--o", dest="order_out", help="Order summary output CSV path")
+    parser.add_argument("--f", dest="family_out", help="Family summary output CSV path")
+    parser.add_argument("--g", dest="genus_out", help="Genus summary output CSV path")
     parser.add_argument(
         "--a",
         "--accession-out",
@@ -630,11 +687,20 @@ def main() -> None:
         help="Optional cache file for accession -> TaxID mappings",
     )
     parser.add_argument(
+        "--acc-workers",
+        type=int,
+        default=1,
+        help="Number of threads to scan multiple accession2taxid files (default: 1)",
+    )
+    parser.add_argument(
         "--tax-cache",
         default=".organize_tax_cache.json",
         help="Optional cache file for TaxID -> taxonomy mappings",
     )
     args = parser.parse_args()
+
+    if not any([args.class_out, args.order_out, args.family_out, args.genus_out, args.accession_out]):
+        raise SystemExit("At least one output option is required: --c/--o/--f/--g/--a")
 
     df_raw = read_tm_results(args.input)
     print(f"[info] Loaded {len(df_raw):,} rows from {args.input}")
@@ -654,7 +720,12 @@ def main() -> None:
         f"{len(all_accessions):,} unique accessions (TSV {len(unique_tsv):,} + FASTA {len(unique_fasta):,}) "
         "to TaxIDs..."
     )
-    acc2tax = map_accessions_to_taxids(all_accessions, cache_path=args.acc_cache, a2t_dir=args.acc2taxid)
+    acc2tax = map_accessions_to_taxids(
+        all_accessions,
+        cache_path=args.acc_cache,
+        a2t_dir=args.acc2taxid,
+        acc_workers=args.acc_workers,
+    )
     resolved_all = sum(1 for acc in all_accessions if acc2tax.get(acc))
     unresolved_all = len(all_accessions) - resolved_all
     print(f"[info] Accession->TaxID resolved: {resolved_all:,} ok, {unresolved_all:,} unresolved")
@@ -664,7 +735,7 @@ def main() -> None:
     print(f"[info] FASTA accessions resolved: {resolved_fasta:,} ok, {unresolved_fasta:,} unresolved")
 
     df_best = df_best.copy()
-    df_best["TaxID"] = df_best["contig"].map(lambda acc: acc2tax.get(acc))
+    df_best["TaxID"] = df_best["contig"].map(acc2tax)
 
     fasta_taxids = [str(acc2tax[acc]) for acc in unique_fasta if acc2tax.get(acc)]
     taxids = [str(t) for t in df_best["TaxID"].dropna().unique()]
@@ -694,19 +765,28 @@ def main() -> None:
         accession_with_tax.reset_index(drop=True, inplace=True)
         write_csv(accession_with_tax, args.accession_out, "per-accession metrics")
 
-    taxid_summary = compute_taxid_summary(accession_metrics, lineage)
+    if any([args.class_out, args.order_out, args.family_out, args.genus_out]):
+        taxid_summary = compute_taxid_summary(accession_metrics, lineage)
 
-    class_metrics = summarize_for_tree_map(taxid_summary, "class")
-    class_summary = build_rank_summary(taxdump, "class", class_metrics, origin_counts.get("class"))
-    write_csv(class_summary, args.class_out, "class summary")
+        if args.class_out:
+            class_metrics = summarize_for_tree_map(taxid_summary, "class")
+            class_summary = build_rank_summary(taxdump, "class", class_metrics, origin_counts.get("class"))
+            write_csv(class_summary, args.class_out, "class summary")
 
-    order_metrics = summarize_for_tree_map(taxid_summary, "order")
-    order_summary = build_rank_summary(taxdump, "order", order_metrics, origin_counts.get("order"))
-    write_csv(order_summary, args.order_out, "order summary")
+        if args.order_out:
+            order_metrics = summarize_for_tree_map(taxid_summary, "order")
+            order_summary = build_rank_summary(taxdump, "order", order_metrics, origin_counts.get("order"))
+            write_csv(order_summary, args.order_out, "order summary")
 
-    family_metrics = summarize_for_tree_map(taxid_summary, "family")
-    family_summary = build_rank_summary(taxdump, "family", family_metrics, origin_counts.get("family"))
-    write_csv(family_summary, args.family_out, "family summary")
+        if args.family_out:
+            family_metrics = summarize_for_tree_map(taxid_summary, "family")
+            family_summary = build_rank_summary(taxdump, "family", family_metrics, origin_counts.get("family"))
+            write_csv(family_summary, args.family_out, "family summary")
+
+        if args.genus_out:
+            genus_metrics = summarize_for_tree_map(taxid_summary, "genus")
+            genus_summary = build_rank_summary(taxdump, "genus", genus_metrics, origin_counts.get("genus"))
+            write_csv(genus_summary, args.genus_out, "genus summary")
 
 
 if __name__ == "__main__":
