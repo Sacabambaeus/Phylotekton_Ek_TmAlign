@@ -141,7 +141,9 @@ python3 tree_map.py /path/to/input.csv /path/to/output.pdf \
  python3 tree_map.py mf-u_all_carangi_family.csv --taxdump taxdump --a --t Carangiformes --d family mf-u_all_carangi_carangi_fam.pdf
 ```
  * 赤色の図形がTm値、水色の図形がidentity(単純な塩基の一致率)、円がForwardプライマー、ひし形がReverseプライマー、右端の緑色の四角形と数字は、計算に使用したレコードの数。括弧の中は、TmAlignの設定で除外される前のレコード数。一つのTaxID（一種）につきひとつのレコード。
-[mf-u_carangi_fam_ex.pdf](https://github.com/user-attachments/files/25563803/mf-u_carangi_fam_ex.pdf)
+<img width="1294" height="647" alt="スクリーンショット (95)" src="https://github.com/user-attachments/assets/ef55e652-10e4-4427-a6d0-cf413141d8eb" />
+
+
 
 
 
