@@ -51,16 +51,18 @@ https://github.com/Sacabambaeus/Tm_Align_analysis/releases/tag/database
 #### 最小実行例
 （※概念的なコマンドです。実際には出力オプションが必須となるため、下の「実行例」を推奨します）
 ```bash
-python3 analyze_tm.py test_input.tsv --acc2taxid acc2taxid --taxdump taxdump
+python3 analyze_tm.py test_input.tsv --fasta reference.fasta --acc2taxid acc2taxid --taxdump taxdump
 ```
 ### 実行例
 ```
 python3 analyze_tm.py /path/to/tm_result.tsv \
+    --fasta /path/to/reference.fasta \
     --acc2taxid /path/to/acc2taxid \
     --taxdump /path/to/taxdump \
     --c /path/to/class_summary.csv \
     --o /path/to/order_summary.csv \
     --f /path/to/family_summary.csv \
+    --g /path/to/genus_summary.csv \
     --a /path/to/accession_taxonomy.csv
 ```
 
@@ -70,14 +72,20 @@ python3 analyze_tm.py /path/to/tm_result.tsv \
 
 | オプション | 必須 | 説明 |
 | :--- | :--- | :--- |
-| `--acc2taxid` | **YES** | `nucl_gb.accession2taxid.gz` が入っているディレクトリを指定します。 |
-| `--taxdump` | **YES** | `nodes.dmp`, `names.dmp` が入っているディレクトリを指定します。 |
-| `--c` | **YES** | **綱 (Class)** レベルの集計結果を出力するCSVパスを指定します。<br>例: `summary_class.csv` |
-| `--o` | **YES** | **目 (Order)** レベルの集計結果を出力するCSVパスを指定します。<br>例: `summary_order.csv` |
-| `--f` | **YES** | **科 (Family)** レベルの集計結果を出力するCSVパスを指定します。<br>例: `summary_family.csv` |
+| `--fasta` | **YES** | Origin TaxID(TmAlign実行前のデータ)のカウントを取得するためのGenBank FASTAファイルを指定します。 |
+| `--acc2taxid` | **NO** | `nucl_gb.accession2taxid.gz` が入っているディレクトリを指定します（省略時は環境変数または accession2taxid フォルダを参照します）。|
+| `--taxdump` | **NO** | `nodes.dmp`, `names.dmp` が入っているディレクトリを指定します（省略時は環境変数または taxdump フォルダを参照します）。 |
+| `--c` | **NO** | **綱 (Class)** レベルの集計結果を出力するCSVパスを指定します。<br>例: `summary_class.csv` |
+| `--o` | **NO** | **目 (Order)** レベルの集計結果を出力するCSVパスを指定します。<br>例: `summary_order.csv` |
+| `--f` | **NO** | **科 (Family)** レベルの集計結果を出力するCSVパスを指定します。<br>例: `summary_family.csv` |
+| `--g` | **NO** | **科 (Family)** レベルの集計結果を出力するCSVパスを指定します。<br>例: `summary_family.csv` |
 | `--a` | No | アクセッションIDごとにTaxonomy情報を付与した詳細リストを出力します。<br>指定しない場合は出力されません。 |
+| `--acc-workers` | **NO** | accession2taxid ファイルを複数スキャンする際のスレッド数を指定します（デフォルト: 1）。 |
+| `--acc-cache` | **NO** | Accession -> TaxID のマッピングを保存・読み込みするキャッシュファイルを指定します。 |
+| `--tax-cache` | **NO** | TaxID -> Taxonomy のマッピングを保存・読み込みするキャッシュファイルを指定します。 |
 
 ---
+(--c / --o / --f / --g / --a のうち、少なくとも1つの出力オプションを指定する必要があります。)
 
 
 ### 2. 可視化 (tree_map.py)
@@ -96,6 +104,7 @@ python3 tree_map.py /path/to/input.csv /path/to/output.pdf \
     --d family \
     tree_act_fam.pdf
 ```
+(深さ個別指定を利用した例: python3 tree_map.py input.csv output.pdf --td Chordata/order )
 
 #### 2. tree_map.py のオプション
 
@@ -104,9 +113,9 @@ python3 tree_map.py /path/to/input.csv /path/to/output.pdf \
 
 | 引数・オプション | 必須 | 説明 |
 | :--- | :--- | :--- |
-| `[入力CSV]` | **YES** | `analyze_tm.py` で出力された集計ファイル（例: `summary_class.csv`）。 |
+| `[入力CSV]` | **YES** | `analyze_tm.py` で出力された集計ファイル（例: `summary_genus.csv`）。 |
 | `[出力画像]` | **YES** | 出力ファイル名。拡張子で `.png` または `.pdf` を指定します。<br>※巨大な系統樹になる場合は **.pdf** を推奨します。<br>※現在 `.png` では、系統樹が背景からはみ出してしまいます。系統樹のサイズにかかわらず、**.pdf**を推奨します。 |
-| `--taxdump` | **YES** | `nodes.dmp` 等が入っているディレクトリを指定します。 |
+| `--taxdump` | **NO** | `nodes.dmp` 等が入っているディレクトリを指定します。（デフォルトは ./taxdump です） |
 
 **フィルター設定（表示する生物種を絞り込む）**
 | オプション | 説明 |
@@ -117,21 +126,24 @@ python3 tree_map.py /path/to/input.csv /path/to/output.pdf \
 | `--m` | **原核生物 (Monera/Bacteria/Archaea)** のみを表示します。 |
 | `--r` | **その他 (Rest)**。動物・植物・菌以外の真核生物（原生生物など）を表示します。 |
 | `--taxon <名前>` | 特定の分類群（例: `Actinopteri`）以下のみを表示します。カンマ区切りで複数指定も可能です。 |
+| `--td <分類群/階級>` | 特定の分類群ごとに描画する深さを個別に指定します (例: Chordata/order)。複数指定も可能です。 |
 
 **表示設定**
 | オプション | 説明 |
 | :--- | :--- |
 | `--t <名前>` | 系統樹の **根 (Root)** にする分類群を指定します。 |
 
-| `--d <階級>` | 描画する **末端 (Leaf)** の階級を指定します。<br>`class` (綱), `order` (目), `family` (科) から選択可能です。 |
+| `--d <階級>` | 描画する **末端 (Leaf)** の階級を指定します。<br>`class` (綱), `order` (目), `family` (科) , `genus` (属)から選択可能です。入力csvを`genus`の階級のcsvにした場合、`genus`以上のどの階級を入力しても結果が出力されます。 |
 
 **出力される図(系統樹)**
  * プライマーはMiFish-U、以下の条件で実行
  ```
  python3 tree_map.py mf-u_all_carangi_family.csv --taxdump taxdump --a --t Carangiformes --d family mf-u_all_carangi_carangi_fam.pdf
 ```
- * 赤色の図形がTm値、水色の図形がidentity(単純な塩基の一致率)、円がForwardプライマー、ひし形がReverseプライマー、右端の緑色の四角形と数字は、計算に使用したレコードの数。一つのTaxIDにつき、一つのレコードとして使用。
-<img width="1209" height="599" alt="carangiformes_family" src="https://github.com/user-attachments/assets/6088f0bf-efd0-49e3-934c-aab99e916174" />
+ * 赤色の図形がTm値、水色の図形がidentity(単純な塩基の一致率)、円がForwardプライマー、ひし形がReverseプライマー、右端の緑色の四角形と数字は、計算に使用したレコードの数。括弧の中は、TmAlignの設定で除外される前のレコード数。一つのTaxID（一種）につきひとつのレコード。
+[mf-u_carangi_fam_ex.pdf](https://github.com/user-attachments/files/25563803/mf-u_carangi_fam_ex.pdf)
+
+
 
 
 
