@@ -10,22 +10,29 @@ from typing import Dict, Iterable, List
 import pandas as pd
 import streamlit as st
 
-from tree_map import (
-    DEPTH_CHOICES,
-    RANK_ORDER,
-    aggregate_by_depth_assignments,
-    aggregate_to_depth,
-    apply_taxon_depths,
-    build_tree,
-    draw_tree,
-    fill_missing_ranks,
-    filter_by_flags,
-    filter_by_taxon_names,
-    load_taxdump,
-    normalize_taxon_depths,
-    normalize_taxon_filters,
-    read_input,
-)
+TREE_MAP_IMPORT_ERROR: Exception | None = None
+
+try:
+    from tree_map import (
+        DEPTH_CHOICES,
+        RANK_ORDER,
+        aggregate_by_depth_assignments,
+        aggregate_to_depth,
+        apply_taxon_depths,
+        build_tree,
+        draw_tree,
+        fill_missing_ranks,
+        filter_by_flags,
+        filter_by_taxon_names,
+        load_taxdump,
+        normalize_taxon_depths,
+        normalize_taxon_filters,
+        read_input,
+    )
+except Exception as exc:  # pragma: no cover - only used when deployment is missing runtime deps
+    TREE_MAP_IMPORT_ERROR = exc
+    DEPTH_CHOICES = ["class", "order", "family", "genus"]
+    RANK_ORDER = []
 
 
 SESSION_KEY = "tree_map_web_state"
@@ -212,6 +219,18 @@ def render_app(*, standalone: bool = False) -> None:
         st.set_page_config(page_title="Tree Map Web", layout="wide")
 
     st.title("Tree Map Web")
+    if TREE_MAP_IMPORT_ERROR is not None:
+        st.error(
+            "tree_map.py could not be imported. On Streamlit Community Cloud this usually means "
+            "a runtime dependency such as matplotlib was not installed in the deployed environment."
+        )
+        st.code(repr(TREE_MAP_IMPORT_ERROR))
+        st.info(
+            "Confirm that `requirements.txt` is present at the repository root, includes `matplotlib`, "
+            "then trigger a full redeploy or reboot of the app."
+        )
+        return
+
     st.write(
         "Upload a summary CSV and taxdump files to render the taxonomy tree in PNG or PDF format."
     )
